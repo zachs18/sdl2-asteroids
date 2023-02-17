@@ -1,3 +1,4 @@
+use glam::{DVec2, DVec3};
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
@@ -17,6 +18,133 @@ fn hue_to_color(hue: u32) -> Color {
         Color::RGB((hue - 255 * 4) as u8, 0, 255)
     } else {
         Color::RGB(255, 0, (255 * 6 - hue) as u8)
+    }
+}
+
+#[derive(Default)]
+struct Entity {
+    color_offset: u32,
+    position: DVec3,
+    velocity: DVec3,
+    acceleration: DVec3,
+    north: Option<Keycode>,
+    accelerating_north: bool,
+    east: Option<Keycode>,
+    accelerating_east: bool,
+    south: Option<Keycode>,
+    accelerating_south: bool,
+    west: Option<Keycode>,
+    accelerating_west: bool,
+    jump: Option<Keycode>,
+    jumping: bool,
+}
+
+impl Entity {
+    fn handle_event(&mut self, event: &Event) {
+        match event {
+            &Event::KeyDown {
+                keycode: Some(keycode),
+                repeat: false,
+                ..
+            } => {
+                if Some(keycode) == self.north {
+                    self.accelerating_north = true;
+                } else if Some(keycode) == self.east {
+                    self.accelerating_east = true;
+                } else if Some(keycode) == self.south {
+                    self.accelerating_south = true;
+                } else if Some(keycode) == self.west {
+                    self.accelerating_west = true;
+                } else if Some(keycode) == self.jump {
+                    self.jumping = true;
+                }
+            }
+            &Event::KeyUp {
+                keycode: Some(keycode),
+                ..
+            } => {
+                if Some(keycode) == self.north {
+                    self.accelerating_north = false;
+                } else if Some(keycode) == self.east {
+                    self.accelerating_east = false;
+                } else if Some(keycode) == self.south {
+                    self.accelerating_south = false;
+                } else if Some(keycode) == self.west {
+                    self.accelerating_west = false;
+                } else if Some(keycode) == self.jump {
+                    self.jumping = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    fn step(&mut self) {
+        match (self.accelerating_north, self.accelerating_south) {
+            (false, true) => {
+                if self.velocity.y < 0.0 {
+                    self.velocity.y *= 0.9;
+                }
+                self.acceleration.y = 0.1;
+            }
+            (true, false) => {
+                if self.velocity.y > 0.0 {
+                    self.velocity.y *= 0.9;
+                }
+                self.acceleration.y = -0.1;
+            }
+            _ => {
+                self.velocity.y *= 0.9;
+                self.acceleration.y = 0.0;
+            }
+        }
+        match (self.accelerating_west, self.accelerating_east) {
+            (false, true) => {
+                if self.velocity.x < 0.0 {
+                    self.velocity.x *= 0.9;
+                }
+                self.acceleration.x = 0.1;
+            }
+            (true, false) => {
+                if self.velocity.x > 0.0 {
+                    self.velocity.x *= 0.9;
+                }
+                self.acceleration.x = -0.1;
+            }
+            _ => {
+                self.velocity.x *= 0.9;
+                self.acceleration.x = 0.0;
+            }
+        }
+        if self.jumping {
+            if self.velocity.z < 0.1 && self.position.z < 0.1 {
+                self.velocity.z = 8.0;
+                self.acceleration.z = -0.3333;
+            }
+        }
+
+        self.position += self.velocity;
+        self.velocity += self.acceleration;
+        if self.position.z < 0.0 {
+            self.position.z = 0.0;
+            self.velocity.z = 0.0;
+            self.acceleration.z = 0.0;
+        }
+    }
+
+    fn project(&self) -> DVec2 {
+        DVec2 {
+            x: self.position.x,
+            y: self.position.y - self.position.z,
+        }
+    }
+}
+
+pub fn shade(c: Color, by: f64) -> Color {
+    Color {
+        r: (c.r as f64 * by) as u8,
+        g: (c.g as f64 * by) as u8,
+        b: (c.b as f64 * by) as u8,
+        a: c.a,
     }
 }
 
@@ -67,125 +195,84 @@ pub fn main() {
     let mut event_pump = sdl_context.event_pump().unwrap();
     let mut hue = 0;
     let mut frame_interval = tokio::time::interval(Duration::new(1, 0) / 60);
-    let mut position = (40.0, 40.0);
-    let mut velocity = (0.0, 0.0);
-    let mut acceleration = (0.0, 0.0);
-
-    #[derive(Default)]
-    struct DirectionButtons {
-        up: bool,
-        down: bool,
-        left: bool,
-        right: bool,
-    }
-
-    let mut direction_buttons = DirectionButtons::default();
+    let mut entities = vec![
+        Entity {
+            color_offset: 255,
+            north: Some(Keycode::Up),
+            east: Some(Keycode::Right),
+            south: Some(Keycode::Down),
+            west: Some(Keycode::Left),
+            jump: Some(Keycode::Space),
+            position: DVec3 {
+                x: 80.0,
+                y: 40.0,
+                z: 0.0,
+            },
+            ..Default::default()
+        },
+        Entity {
+            color_offset: 510,
+            north: Some(Keycode::W),
+            east: Some(Keycode::D),
+            south: Some(Keycode::S),
+            west: Some(Keycode::A),
+            jump: Some(Keycode::LCtrl),
+            position: DVec3 {
+                x: 240.0,
+                y: 40.0,
+                z: 0.0,
+            },
+            ..Default::default()
+        },
+    ];
 
     'running: loop {
         hue = (hue + 1) % (255 * 6);
         canvas.set_draw_color(hue_to_color(hue));
         canvas.clear();
         for event in event_pump.poll_iter() {
+            entities
+                .iter_mut()
+                .for_each(|entity| entity.handle_event(&event));
             match event {
                 Event::Quit { .. }
                 | Event::KeyDown {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
-                Event::KeyDown {
-                    keycode: Some(keycode),
-                    repeat,
-                    ..
-                } => match keycode {
-                    Keycode::Up if !repeat => direction_buttons.up = true,
-                    Keycode::Down if !repeat => direction_buttons.down = true,
-                    Keycode::Left if !repeat => direction_buttons.left = true,
-                    Keycode::Right if !repeat => direction_buttons.right = true,
-                    _ => {}
-                },
-                Event::KeyUp {
-                    keycode: Some(keycode),
-                    ..
-                } => match keycode {
-                    Keycode::Up => direction_buttons.up = false,
-                    Keycode::Down => direction_buttons.down = false,
-                    Keycode::Left => direction_buttons.left = false,
-                    Keycode::Right => direction_buttons.right = false,
-                    _ => {}
-                },
                 _ => {}
             }
         }
         // The rest of the game loop goes here...
 
-        match (direction_buttons.up, direction_buttons.down) {
-            (false, true) => {
-                if velocity.1 < 0.0 {
-                    velocity.1 *= 0.9;
-                }
-                acceleration.1 = 0.1;
-            }
-            (true, false) => {
-                if velocity.1 > 0.0 {
-                    velocity.1 *= 0.9;
-                }
-                acceleration.1 = -0.1;
-            }
-            _ => {
-                velocity.1 *= 0.9;
-                acceleration.1 = 0.0;
-            }
+        for entity in &mut entities {
+            entity.step();
         }
+        entities.sort_unstable_by_key(|entity| float_ord::FloatOrd(entity.position.y));
+        for entity in &entities {
+            let shadow_x = entity.position.x;
+            let shadow_y = entity.position.y;
 
-        match (direction_buttons.left, direction_buttons.right) {
-            (false, true) => {
-                if velocity.0 < 0.0 {
-                    velocity.0 *= 0.9;
-                }
-                acceleration.0 = 0.1;
-            }
-            (true, false) => {
-                if velocity.0 > 0.0 {
-                    velocity.0 *= 0.9;
-                }
-                acceleration.0 = -0.1;
-            }
-            _ => {
-                velocity.0 *= 0.9;
-                acceleration.0 = 0.0;
-            }
+            canvas.set_draw_color(shade(hue_to_color(hue), 0.5));
+
+            canvas
+                .fill_rect(Rect::new(
+                    shadow_x as i32 - 20,
+                    shadow_y as i32 + 30,
+                    40,
+                    20,
+                ))
+                .ok();
         }
+        for entity in &entities {
+            let DVec2 { x, y } = entity.project();
 
-        position.0 += velocity.0;
-        position.1 += velocity.1;
+            canvas.set_draw_color(hue_to_color((hue + entity.color_offset) % (255 * 6)));
 
-        velocity.0 += acceleration.0;
-        velocity.1 += acceleration.1;
-
-        let (w, h) = canvas.output_size().unwrap();
-        let w = w.max(80);
-        let h = h.max(80);
-        if position.0 < 40.0 || position.0 > (w - 40) as f64 {
-            position.0 = f64::clamp(position.0, 40.0, (w - 40) as f64);
-            velocity.0 = 0.0;
-            acceleration.0 = 0.0;
+            canvas
+                .fill_rect(Rect::new(x as i32 - 40, y as i32 - 40, 80, 80))
+                .ok();
         }
-        if position.1 < 40.0 || position.1 > (h - 40) as f64 {
-            position.1 = f64::clamp(position.1, 40.0, (h - 40) as f64);
-            velocity.1 = 0.0;
-            acceleration.1 = 0.0;
-        }
-
-        canvas.set_draw_color(hue_to_color((hue + 255 * 3) % (255 * 6)));
-
-        canvas
-            .fill_rect(Rect::new(
-                position.0 as i32 - 40,
-                position.1 as i32 - 40,
-                80,
-                80,
-            ))
-            .ok();
 
         canvas.present();
         handle.block_on(frame_interval.tick());
