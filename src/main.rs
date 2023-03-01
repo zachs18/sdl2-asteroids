@@ -22,11 +22,16 @@ fn hue_to_color(hue: u32) -> Color {
 }
 
 #[derive(Default)]
-struct Entity {
-    color_offset: u32,
+struct Body {
     position: DVec3,
     velocity: DVec3,
     acceleration: DVec3,
+}
+
+#[derive(Default)]
+struct Entity {
+    body: Body,
+    color_offset: u32,
     north: Option<Keycode>,
     accelerating_north: bool,
     east: Option<Keycode>,
@@ -81,60 +86,60 @@ impl Entity {
     fn step(&mut self) {
         match (self.accelerating_north, self.accelerating_south) {
             (false, true) => {
-                if self.velocity.y < 0.0 {
-                    self.velocity.y *= 0.9;
+                if self.body.velocity.y < 0.0 {
+                    self.body.velocity.y *= 0.9;
                 }
-                self.acceleration.y = 0.1;
+                self.body.acceleration.y = 0.1;
             }
             (true, false) => {
-                if self.velocity.y > 0.0 {
-                    self.velocity.y *= 0.9;
+                if self.body.velocity.y > 0.0 {
+                    self.body.velocity.y *= 0.9;
                 }
-                self.acceleration.y = -0.1;
+                self.body.acceleration.y = -0.1;
             }
             _ => {
-                self.velocity.y *= 0.9;
-                self.acceleration.y = 0.0;
+                self.body.velocity.y *= 0.9;
+                self.body.acceleration.y = 0.0;
             }
         }
         match (self.accelerating_west, self.accelerating_east) {
             (false, true) => {
-                if self.velocity.x < 0.0 {
-                    self.velocity.x *= 0.9;
+                if self.body.velocity.x < 0.0 {
+                    self.body.velocity.x *= 0.9;
                 }
-                self.acceleration.x = 0.1;
+                self.body.acceleration.x = 0.1;
             }
             (true, false) => {
-                if self.velocity.x > 0.0 {
-                    self.velocity.x *= 0.9;
+                if self.body.velocity.x > 0.0 {
+                    self.body.velocity.x *= 0.9;
                 }
-                self.acceleration.x = -0.1;
+                self.body.acceleration.x = -0.1;
             }
             _ => {
-                self.velocity.x *= 0.9;
-                self.acceleration.x = 0.0;
+                self.body.velocity.x *= 0.9;
+                self.body.acceleration.x = 0.0;
             }
         }
         if self.jumping {
-            if self.velocity.z < 0.1 && self.position.z < 0.1 {
-                self.velocity.z = 8.0;
-                self.acceleration.z = -0.3333;
+            if self.body.velocity.z < 0.1 && self.body.position.z < 0.1 {
+                self.body.velocity.z = 8.0;
+                self.body.acceleration.z = -0.3333;
             }
         }
 
-        self.position += self.velocity;
-        self.velocity += self.acceleration;
-        if self.position.z < 0.0 {
-            self.position.z = 0.0;
-            self.velocity.z = 0.0;
-            self.acceleration.z = 0.0;
+        self.body.position += self.body.velocity;
+        self.body.velocity += self.body.acceleration;
+        if self.body.position.z < 0.0 {
+            self.body.position.z = 0.0;
+            self.body.velocity.z = 0.0;
+            self.body.acceleration.z = 0.0;
         }
     }
 
     fn project(&self) -> DVec2 {
         DVec2 {
-            x: self.position.x,
-            y: self.position.y - self.position.z,
+            x: self.body.position.x,
+            y: self.body.position.y - self.body.position.z,
         }
     }
 }
@@ -197,30 +202,36 @@ pub fn main() {
     let mut frame_interval = tokio::time::interval(Duration::new(1, 0) / 60);
     let mut entities = vec![
         Entity {
-            color_offset: 255,
+            color_offset: 510,
             north: Some(Keycode::Up),
             east: Some(Keycode::Right),
             south: Some(Keycode::Down),
             west: Some(Keycode::Left),
             jump: Some(Keycode::Space),
-            position: DVec3 {
-                x: 80.0,
-                y: 40.0,
-                z: 0.0,
+            body: Body {
+                position: DVec3 {
+                    x: 80.0,
+                    y: 40.0,
+                    z: 0.0,
+                },
+                ..Default::default()
             },
             ..Default::default()
         },
         Entity {
-            color_offset: 510,
+            color_offset: 1020,
             north: Some(Keycode::W),
             east: Some(Keycode::D),
             south: Some(Keycode::S),
             west: Some(Keycode::A),
             jump: Some(Keycode::LCtrl),
-            position: DVec3 {
-                x: 240.0,
-                y: 40.0,
-                z: 0.0,
+            body: Body {
+                position: DVec3 {
+                    x: 240.0,
+                    y: 40.0,
+                    z: 0.0,
+                },
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -248,10 +259,10 @@ pub fn main() {
         for entity in &mut entities {
             entity.step();
         }
-        entities.sort_unstable_by_key(|entity| float_ord::FloatOrd(entity.position.y));
+        entities.sort_unstable_by_key(|entity| float_ord::FloatOrd(entity.body.position.y));
         for entity in &entities {
-            let shadow_x = entity.position.x;
-            let shadow_y = entity.position.y;
+            let shadow_x = entity.body.position.x;
+            let shadow_y = entity.body.position.y;
 
             canvas.set_draw_color(shade(hue_to_color(hue), 0.5));
 
