@@ -1,9 +1,16 @@
-use glam::{DVec2, DVec3};
+use as_point::AsPoint;
+use glam::{DMat2, DVec2, UVec2};
+use itertools::Itertools;
+use rand::Rng;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
-use sdl2::rect::Rect;
+use std::borrow::Cow;
 use std::time::Duration;
+
+mod as_point;
+
+const FPS: u32 = 60;
 
 fn hue_to_color(hue: u32) -> Color {
     if hue <= 255 {
@@ -23,124 +30,208 @@ fn hue_to_color(hue: u32) -> Color {
 
 #[derive(Default)]
 struct Body {
-    position: DVec3,
-    velocity: DVec3,
-    acceleration: DVec3,
+    position: DVec2,
+    velocity: DVec2,
+    /// in radians, clockwise from north
+    rotation: f64,
+    accelerating: bool,
+    turning_left: bool,
+    turning_right: bool,
 }
 
-#[derive(Default)]
-struct Entity {
-    body: Body,
-    color_offset: u32,
-    north: Option<Keycode>,
-    accelerating_north: bool,
-    east: Option<Keycode>,
-    accelerating_east: bool,
-    south: Option<Keycode>,
-    accelerating_south: bool,
-    west: Option<Keycode>,
-    accelerating_west: bool,
-    jump: Option<Keycode>,
-    jumping: bool,
-}
-
-impl Entity {
-    fn handle_event(&mut self, event: &Event) {
-        match event {
-            &Event::KeyDown {
-                keycode: Some(keycode),
-                repeat: false,
-                ..
-            } => {
-                if Some(keycode) == self.north {
-                    self.accelerating_north = true;
-                } else if Some(keycode) == self.east {
-                    self.accelerating_east = true;
-                } else if Some(keycode) == self.south {
-                    self.accelerating_south = true;
-                } else if Some(keycode) == self.west {
-                    self.accelerating_west = true;
-                } else if Some(keycode) == self.jump {
-                    self.jumping = true;
-                }
+impl Body {
+    fn step(&mut self, bounds: DVec2) {
+        if self.accelerating {
+            let rota = rotation_matrix(self.rotation);
+            self.velocity += rota * DVec2 { x: 0.0, y: -0.1 };
+        }
+        match (self.turning_left, self.turning_right) {
+            (false, true) => {
+                // Rotate at 1/4 rotations per second
+                self.rotation = (self.rotation - std::f64::consts::TAU / (FPS * 4) as f64)
+                    .rem_euclid(std::f64::consts::TAU);
             }
-            &Event::KeyUp {
-                keycode: Some(keycode),
-                ..
-            } => {
-                if Some(keycode) == self.north {
-                    self.accelerating_north = false;
-                } else if Some(keycode) == self.east {
-                    self.accelerating_east = false;
-                } else if Some(keycode) == self.south {
-                    self.accelerating_south = false;
-                } else if Some(keycode) == self.west {
-                    self.accelerating_west = false;
-                } else if Some(keycode) == self.jump {
-                    self.jumping = false;
-                }
+            (true, false) => {
+                // Rotate at 1/4 rotations per second
+                self.rotation = (self.rotation + std::f64::consts::TAU / (FPS * 4) as f64)
+                    .rem_euclid(std::f64::consts::TAU)
             }
             _ => {}
         }
-    }
-    fn step(&mut self) {
-        match (self.accelerating_north, self.accelerating_south) {
-            (false, true) => {
-                if self.body.velocity.y < 0.0 {
-                    self.body.velocity.y *= 0.9;
-                }
-                self.body.acceleration.y = 0.1;
-            }
-            (true, false) => {
-                if self.body.velocity.y > 0.0 {
-                    self.body.velocity.y *= 0.9;
-                }
-                self.body.acceleration.y = -0.1;
-            }
-            _ => {
-                self.body.velocity.y *= 0.9;
-                self.body.acceleration.y = 0.0;
-            }
-        }
-        match (self.accelerating_west, self.accelerating_east) {
-            (false, true) => {
-                if self.body.velocity.x < 0.0 {
-                    self.body.velocity.x *= 0.9;
-                }
-                self.body.acceleration.x = 0.1;
-            }
-            (true, false) => {
-                if self.body.velocity.x > 0.0 {
-                    self.body.velocity.x *= 0.9;
-                }
-                self.body.acceleration.x = -0.1;
-            }
-            _ => {
-                self.body.velocity.x *= 0.9;
-                self.body.acceleration.x = 0.0;
-            }
-        }
-        if self.jumping {
-            if self.body.velocity.z < 0.1 && self.body.position.z < 0.1 {
-                self.body.velocity.z = 8.0;
-                self.body.acceleration.z = -0.3333;
-            }
-        }
 
-        self.body.position += self.body.velocity;
-        self.body.velocity += self.body.acceleration;
-        if self.body.position.z < 0.0 {
-            self.body.position.z = 0.0;
-            self.body.velocity.z = 0.0;
-            self.body.acceleration.z = 0.0;
+        self.position += self.velocity;
+        // self.position = self.position.rem_euclid(bounds);
+        self.position.x = self.position.x.rem_euclid(bounds.x);
+        self.position.y = self.position.y.rem_euclid(bounds.y);
+    }
+}
+
+struct Polygon {
+    /// Offsets from origin, cyclic
+    verts: Cow<'static, [DVec2]>,
+}
+
+struct Entity {
+    body: Body,
+    verts: Option<Polygon>,
+    kind: EntityKind,
+}
+
+enum EntityKind {
+    Asteroid {
+        /// Decremented by 1 each time the asteroid splits, until it is gone.
+        size: usize,
+    },
+    Bullet {
+        /// Time to live, in frames
+        ttl: u64,
+    },
+    Player {
+        fire: Option<Keycode>,
+        accelerate: Option<Keycode>,
+        turn_left: Option<Keycode>,
+        turn_right: Option<Keycode>,
+    },
+}
+
+const BULLET_VERTS: Cow<[DVec2]> = Cow::Borrowed(&[
+    DVec2 { x: 1.0, y: 3.0 },
+    DVec2 { x: 1.0, y: -3.0 },
+    DVec2 { x: -1.0, y: -3.0 },
+    DVec2 { x: -1.0, y: 3.0 },
+]);
+
+fn asteroid_verts(
+    vert_count: usize,
+    min_distance: f64,
+    max_distance: f64,
+) -> Cow<'static, [DVec2]> {
+    assert!(vert_count >= 3);
+    let mut rng = rand::thread_rng();
+    let theta_increment = std::f64::consts::TAU / (vert_count as f64);
+    Cow::Owned(
+        (0..vert_count)
+            .map(|idx| {
+                rotation_matrix(theta_increment * idx as f64)
+                    * DVec2 {
+                        x: 0.0,
+                        y: rng.gen_range(min_distance..=max_distance),
+                    }
+            })
+            .collect(),
+    )
+}
+
+fn small_asteroid(body: Body) -> Entity {
+    let verts = asteroid_verts(6, 13.0, 17.0);
+    Entity {
+        body,
+        verts: Some(Polygon { verts }),
+        kind: EntityKind::Asteroid { size: 0 },
+    }
+}
+
+fn medium_asteroid(body: Body) -> Entity {
+    let verts = asteroid_verts(8, 20.0, 30.0);
+    Entity {
+        body,
+        verts: Some(Polygon { verts }),
+        kind: EntityKind::Asteroid { size: 1 },
+    }
+}
+
+fn large_asteroid(body: Body) -> Entity {
+    let verts = asteroid_verts(14, 35.0, 45.0);
+    Entity {
+        body,
+        verts: Some(Polygon { verts }),
+        kind: EntityKind::Asteroid { size: 2 },
+    }
+}
+
+enum StepResult {
+    None,
+    RemoveEntity,
+}
+
+enum CollisionResult {
+    None,
+    RemoveSelf,
+    RemoveBoth,
+    RemoveOther,
+}
+
+impl Entity {
+    fn handle_event(&mut self, event: &Event) -> Vec<Entity> {
+        let mut new_entities = vec![];
+        match self.kind {
+            EntityKind::Player {
+                fire,
+                accelerate,
+                turn_left,
+                turn_right,
+            } => match event {
+                &Event::KeyDown {
+                    keycode: Some(keycode),
+                    repeat: false,
+                    ..
+                } => {
+                    if Some(keycode) == accelerate {
+                        self.body.accelerating = true;
+                    } else if Some(keycode) == turn_left {
+                        self.body.turning_left = true;
+                    } else if Some(keycode) == turn_right {
+                        self.body.turning_right = true;
+                    } else if Some(keycode) == fire {
+                        let fire_direction =
+                            rotation_matrix(self.body.rotation) * DVec2 { x: 0.0, y: -1.0 };
+                        new_entities.push(Entity {
+                            body: Body {
+                                position: self.body.position + fire_direction * 20.0,
+                                velocity: fire_direction * 4.0 + self.body.velocity,
+                                rotation: self.body.rotation,
+                                accelerating: false,
+                                turning_left: false,
+                                turning_right: false,
+                            },
+                            verts: Some(Polygon {
+                                verts: BULLET_VERTS,
+                            }),
+                            kind: EntityKind::Bullet { ttl: 60 },
+                        })
+                    }
+                }
+                &Event::KeyUp {
+                    keycode: Some(keycode),
+                    ..
+                } => {
+                    if Some(keycode) == accelerate {
+                        self.body.accelerating = false;
+                    } else if Some(keycode) == turn_left {
+                        self.body.turning_left = false;
+                    } else if Some(keycode) == turn_right {
+                        self.body.turning_right = false;
+                    }
+                }
+                _ => {}
+            },
+            EntityKind::Asteroid { .. } => {}
+            EntityKind::Bullet { .. } => {} // _ => todo!(),
         }
+        new_entities
     }
 
-    fn project(&self) -> DVec2 {
-        DVec2 {
-            x: self.body.position.x,
-            y: self.body.position.y - self.body.position.z,
+    fn step(&mut self, bounds: DVec2) -> StepResult {
+        self.body.step(bounds);
+        match &mut self.kind {
+            EntityKind::Asteroid { .. } => {}
+            EntityKind::Bullet { ttl } => match ttl.checked_sub(1) {
+                Some(new_ttl) => *ttl = new_ttl,
+                None => return StepResult::RemoveEntity,
+            },
+            EntityKind::Player { .. } => {}
         }
+        StepResult::None
     }
 }
 
@@ -150,6 +241,19 @@ pub fn shade(c: Color, by: f64) -> Color {
         g: (c.g as f64 * by) as u8,
         b: (c.b as f64 * by) as u8,
         a: c.a,
+    }
+}
+
+pub fn rotation_matrix(theta: f64) -> DMat2 {
+    DMat2 {
+        x_axis: DVec2 {
+            x: theta.cos(),
+            y: -theta.sin(),
+        },
+        y_axis: DVec2 {
+            x: theta.sin(),
+            y: theta.cos(),
+        },
     }
 }
 
@@ -179,7 +283,7 @@ pub fn main() {
         runtime.block_on(async move {
             let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
             handle_tx.send((stop_tx, runtime.handle().clone())).unwrap();
-            let mut interval = tokio::time::interval(Duration::new(1, 0) / 60);
+            let mut interval = tokio::time::interval(Duration::new(1, 0) / FPS);
             loop {
                 if *stop_rx.borrow_and_update() {
                     break;
@@ -198,53 +302,76 @@ pub fn main() {
     let _enterguard = handle.enter();
 
     let mut event_pump = sdl_context.event_pump().unwrap();
-    let mut hue = 0;
     let mut frame_interval = tokio::time::interval(Duration::new(1, 0) / 60);
     let mut entities = vec![
         Entity {
-            color_offset: 510,
-            north: Some(Keycode::Up),
-            east: Some(Keycode::Right),
-            south: Some(Keycode::Down),
-            west: Some(Keycode::Left),
-            jump: Some(Keycode::Space),
+            verts: Some(Polygon {
+                verts: Cow::Borrowed(&[
+                    DVec2 { x: 0.0, y: -20.0 },
+                    DVec2 { x: 10.0, y: 10.0 },
+                    DVec2 { x: 0.0, y: 0.0 },
+                    DVec2 { x: -10.0, y: 10.0 },
+                ]),
+            }),
             body: Body {
-                position: DVec3 {
-                    x: 80.0,
-                    y: 40.0,
-                    z: 0.0,
-                },
+                position: DVec2 { x: 80.0, y: 40.0 },
                 ..Default::default()
             },
-            ..Default::default()
+            kind: EntityKind::Player {
+                accelerate: Some(Keycode::Up),
+                turn_right: Some(Keycode::Right),
+                turn_left: Some(Keycode::Left),
+                fire: Some(Keycode::Space),
+            },
         },
         Entity {
-            color_offset: 1020,
-            north: Some(Keycode::W),
-            east: Some(Keycode::D),
-            south: Some(Keycode::S),
-            west: Some(Keycode::A),
-            jump: Some(Keycode::LCtrl),
+            verts: Some(Polygon {
+                verts: Cow::Borrowed(&[
+                    DVec2 { x: 0.0, y: -20.0 },
+                    DVec2 { x: 10.0, y: 10.0 },
+                    DVec2 { x: 0.0, y: 0.0 },
+                    DVec2 { x: -10.0, y: 10.0 },
+                ]),
+            }),
             body: Body {
-                position: DVec3 {
-                    x: 240.0,
-                    y: 40.0,
-                    z: 0.0,
-                },
+                position: DVec2 { x: 240.0, y: 40.0 },
                 ..Default::default()
             },
-            ..Default::default()
+            kind: EntityKind::Player {
+                accelerate: Some(Keycode::W),
+                turn_right: Some(Keycode::D),
+                turn_left: Some(Keycode::A),
+                fire: Some(Keycode::LCtrl),
+            },
         },
+        medium_asteroid(Body {
+            position: DVec2::default(),
+            velocity: DVec2 { x: 4.0, y: 5.1 },
+            rotation: 0.0,
+            accelerating: false,
+            turning_left: false,
+            turning_right: false,
+        }),
+        small_asteroid(Body {
+            position: DVec2::default(),
+            velocity: DVec2 { x: 6.0, y: -3.1 },
+            rotation: 0.0,
+            accelerating: false,
+            turning_left: false,
+            turning_right: false,
+        }),
     ];
 
     'running: loop {
-        hue = (hue + 1) % (255 * 6);
-        canvas.set_draw_color(hue_to_color(hue));
+        let draw_color = Color::WHITE;
+        canvas.set_draw_color(Color::BLACK);
         canvas.clear();
         for event in event_pump.poll_iter() {
-            entities
+            let new_entities = entities
                 .iter_mut()
-                .for_each(|entity| entity.handle_event(&event));
+                .flat_map(|entity| entity.handle_event(&event))
+                .collect::<Vec<_>>();
+            entities.extend(new_entities);
             match event {
                 Event::Quit { .. }
                 | Event::KeyDown {
@@ -256,33 +383,33 @@ pub fn main() {
         }
         // The rest of the game loop goes here...
 
-        for entity in &mut entities {
-            entity.step();
-        }
+        let bounds: UVec2 = canvas.output_size().unwrap().into();
+        let bounds: DVec2 = bounds.as_dvec2();
+
+        // TODO: collisions
+        entities.retain_mut(|entity| match entity.step(bounds) {
+            StepResult::RemoveEntity => false,
+            StepResult::None => true,
+        });
         entities.sort_unstable_by_key(|entity| float_ord::FloatOrd(entity.body.position.y));
         for entity in &entities {
-            let shadow_x = entity.body.position.x;
-            let shadow_y = entity.body.position.y;
+            let pos = entity.body.position;
+            let rota = rotation_matrix(entity.body.rotation);
 
-            canvas.set_draw_color(shade(hue_to_color(hue), 0.5));
+            // canvas.set_draw_color(hue_to_color((hue + entity.color_offset) % (255 * 6)));
+            canvas.set_draw_color(draw_color);
 
-            canvas
-                .fill_rect(Rect::new(
-                    shadow_x as i32 - 20,
-                    shadow_y as i32 + 30,
-                    40,
-                    20,
-                ))
-                .ok();
-        }
-        for entity in &entities {
-            let DVec2 { x, y } = entity.project();
+            if let Some(verts) = &entity.verts {
+                for (p1, p2) in verts.verts.iter().copied().circular_tuple_windows() {
+                    let p1 = rota * p1 + pos;
+                    let p2 = rota * p2 + pos;
+                    canvas.draw_line(p1.as_point(), p2.as_point()).ok();
+                }
+            }
 
-            canvas.set_draw_color(hue_to_color((hue + entity.color_offset) % (255 * 6)));
-
-            canvas
-                .fill_rect(Rect::new(x as i32 - 40, y as i32 - 40, 80, 80))
-                .ok();
+            // canvas
+            //     .fill_rect(Rect::new(x as i32 - 40, y as i32 - 40, 80, 80))
+            //     .ok();
         }
 
         canvas.present();
