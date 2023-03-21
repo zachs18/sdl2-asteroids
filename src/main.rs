@@ -34,6 +34,7 @@ struct Body {
     velocity: DVec2,
     /// in radians, clockwise from north
     rotation: f64,
+    has_drag: bool,
     accelerating: bool,
     turning_left: bool,
     turning_right: bool,
@@ -57,6 +58,10 @@ impl Body {
                     .rem_euclid(std::f64::consts::TAU)
             }
             _ => {}
+        }
+
+        if self.has_drag {
+            self.velocity *= 0.99;
         }
 
         self.position += self.velocity;
@@ -123,7 +128,7 @@ fn asteroid_verts(
 }
 
 fn small_asteroid(body: Body) -> Entity {
-    let verts = asteroid_verts(6, 13.0, 17.0);
+    let verts = asteroid_verts(6, 20.0, 28.0);
     Entity {
         body,
         verts: Some(Polygon { verts }),
@@ -132,7 +137,7 @@ fn small_asteroid(body: Body) -> Entity {
 }
 
 fn medium_asteroid(body: Body) -> Entity {
-    let verts = asteroid_verts(8, 20.0, 30.0);
+    let verts = asteroid_verts(8, 30.0, 40.0);
     Entity {
         body,
         verts: Some(Polygon { verts }),
@@ -141,7 +146,7 @@ fn medium_asteroid(body: Body) -> Entity {
 }
 
 fn large_asteroid(body: Body) -> Entity {
-    let verts = asteroid_verts(14, 35.0, 45.0);
+    let verts = asteroid_verts(14, 39.0, 50.0);
     Entity {
         body,
         verts: Some(Polygon { verts }),
@@ -190,6 +195,7 @@ impl Entity {
                                 position: self.body.position + fire_direction * 20.0,
                                 velocity: fire_direction * 4.0 + self.body.velocity,
                                 rotation: self.body.rotation,
+                                has_drag: false,
                                 accelerating: false,
                                 turning_left: false,
                                 turning_right: false,
@@ -197,7 +203,7 @@ impl Entity {
                             verts: Some(Polygon {
                                 verts: BULLET_VERTS,
                             }),
-                            kind: EntityKind::Bullet { ttl: 60 },
+                            kind: EntityKind::Bullet { ttl: 120 },
                         })
                     }
                 }
@@ -315,6 +321,7 @@ pub fn main() {
             }),
             body: Body {
                 position: DVec2 { x: 80.0, y: 40.0 },
+                has_drag: true,
                 ..Default::default()
             },
             kind: EntityKind::Player {
@@ -335,6 +342,7 @@ pub fn main() {
             }),
             body: Body {
                 position: DVec2 { x: 240.0, y: 40.0 },
+                has_drag: true,
                 ..Default::default()
             },
             kind: EntityKind::Player {
@@ -344,18 +352,29 @@ pub fn main() {
                 fire: Some(Keycode::LCtrl),
             },
         },
+        large_asteroid(Body {
+            position: DVec2::default(),
+            velocity: DVec2 { x: -1.0, y: 2.2 },
+            rotation: 0.0,
+            has_drag: false,
+            accelerating: false,
+            turning_left: false,
+            turning_right: false,
+        }),
         medium_asteroid(Body {
             position: DVec2::default(),
-            velocity: DVec2 { x: 4.0, y: 5.1 },
+            velocity: DVec2 { x: 1.0, y: 1.2 },
             rotation: 0.0,
+            has_drag: false,
             accelerating: false,
             turning_left: false,
             turning_right: false,
         }),
         small_asteroid(Body {
             position: DVec2::default(),
-            velocity: DVec2 { x: 6.0, y: -3.1 },
+            velocity: DVec2 { x: 2.0, y: -1.6 },
             rotation: 0.0,
+            has_drag: false,
             accelerating: false,
             turning_left: false,
             turning_right: false,
@@ -403,6 +422,35 @@ pub fn main() {
                 for (p1, p2) in verts.verts.iter().copied().circular_tuple_windows() {
                     let p1 = rota * p1 + pos;
                     let p2 = rota * p2 + pos;
+                    // TODO: use a more precise method only draw the offsets that are actually necessary
+                    if p1.x < 0.0
+                        || p2.x < 0.0
+                        || p1.y < 0.0
+                        || p2.y < 0.0
+                        || p1.x > bounds.x
+                        || p1.y > bounds.y
+                        || p2.x > bounds.x
+                        || p2.y > bounds.y
+                    {
+                        for (dy, dx) in [
+                            (-1, -1),
+                            (-1, 0),
+                            (-1, 1),
+                            (0, -1),
+                            (0, 1),
+                            (1, -1),
+                            (1, 0),
+                            (1, -1),
+                        ] {
+                            let mult = DVec2 {
+                                x: dx as f64,
+                                y: dy as f64,
+                            };
+                            let p1 = p1 + bounds * mult;
+                            let p2 = p2 + bounds * mult;
+                            canvas.draw_line(p1.as_point(), p2.as_point()).ok();
+                        }
+                    }
                     canvas.draw_line(p1.as_point(), p2.as_point()).ok();
                 }
             }
