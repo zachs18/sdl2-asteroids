@@ -1,3 +1,4 @@
+use arrayvec::ArrayVec;
 use as_point::AsPoint;
 use glam::{DMat2, DVec2, UVec2};
 use itertools::Itertools;
@@ -422,36 +423,40 @@ pub fn main() {
                 for (p1, p2) in verts.verts.iter().copied().circular_tuple_windows() {
                     let p1 = rota * p1 + pos;
                     let p2 = rota * p2 + pos;
-                    // TODO: use a more precise method only draw the offsets that are actually necessary
-                    if p1.x < 0.0
-                        || p2.x < 0.0
-                        || p1.y < 0.0
-                        || p2.y < 0.0
-                        || p1.x > bounds.x
-                        || p1.y > bounds.y
-                        || p2.x > bounds.x
-                        || p2.y > bounds.y
-                    {
-                        for (dy, dx) in [
-                            (-1, -1),
-                            (-1, 0),
-                            (-1, 1),
-                            (0, -1),
-                            (0, 1),
-                            (1, -1),
-                            (1, 0),
-                            (1, -1),
-                        ] {
+                    let minx = p1.x.min(p2.x);
+                    let maxx = p1.x.max(p2.x);
+                    let miny = p1.y.min(p2.y);
+                    let maxy = p1.y.max(p2.y);
+                    let mut dxs: ArrayVec<i32, 3> = ArrayVec::from_iter([0]);
+                    let mut dys: ArrayVec<i32, 3> = ArrayVec::from_iter([0]);
+                    if minx < 0.0 {
+                        // If the line crosses the top edge, copy it down to the bottom edge
+                        dxs.push(1);
+                    }
+                    if maxx > bounds.x {
+                        // If the line crosses the bottom edge, copy it up to the top edge
+                        dxs.push(-1);
+                    }
+                    if miny < 0.0 {
+                        // If the line crosses the left edge, copy it right to the right edge
+                        dys.push(1);
+                    }
+                    if maxy > bounds.y {
+                        // If the line crosses the right edge, copy it left to the left edge
+                        dys.push(-1);
+                    }
+                    for dy in dys {
+                        for dx in dxs.clone() {
                             let mult = DVec2 {
                                 x: dx as f64,
                                 y: dy as f64,
                             };
-                            let p1 = p1 + bounds * mult;
-                            let p2 = p2 + bounds * mult;
+                            let offset = bounds * mult;
+                            let p1 = p1 + offset;
+                            let p2 = p2 + offset;
                             canvas.draw_line(p1.as_point(), p2.as_point()).ok();
                         }
                     }
-                    canvas.draw_line(p1.as_point(), p2.as_point()).ok();
                 }
             }
 
