@@ -1,33 +1,18 @@
 use arrayvec::ArrayVec;
 use as_point::AsPoint;
+use either::Either;
 use glam::{DMat2, DVec2, UVec2};
 use itertools::Itertools;
 use rand::Rng;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
-use std::borrow::Cow;
+use std::sync::Arc;
 use std::time::Duration;
 
 mod as_point;
 
 const FPS: u32 = 60;
-
-fn hue_to_color(hue: u32) -> Color {
-    if hue <= 255 {
-        Color::RGB(255, hue as u8, 0)
-    } else if hue <= 255 * 2 {
-        Color::RGB((255 * 2 - hue) as u8, 255, 0)
-    } else if hue <= 255 * 3 {
-        Color::RGB(0, 255, (hue - 255 * 2) as u8)
-    } else if hue <= 255 * 4 {
-        Color::RGB(0, (255 * 4 - hue) as u8, 255)
-    } else if hue <= 255 * 5 {
-        Color::RGB((hue - 255 * 4) as u8, 0, 255)
-    } else {
-        Color::RGB(255, 0, (255 * 6 - hue) as u8)
-    }
-}
 
 #[derive(Default)]
 struct Body {
@@ -42,20 +27,20 @@ struct Body {
 }
 
 impl Body {
-    fn step(&mut self, bounds: DVec2) {
+    fn step(&mut self, bounds: DVec2, wrap: bool) {
         if self.accelerating {
             let rota = rotation_matrix(self.rotation);
             self.velocity += rota * DVec2 { x: 0.0, y: -0.1 };
         }
         match (self.turning_left, self.turning_right) {
             (false, true) => {
-                // Rotate at 1/4 rotations per second
-                self.rotation = (self.rotation - std::f64::consts::TAU / (FPS * 4) as f64)
+                // Rotate at 1/3 rotations per second
+                self.rotation = (self.rotation - std::f64::consts::TAU / (FPS * 3) as f64)
                     .rem_euclid(std::f64::consts::TAU);
             }
             (true, false) => {
-                // Rotate at 1/4 rotations per second
-                self.rotation = (self.rotation + std::f64::consts::TAU / (FPS * 4) as f64)
+                // Rotate at 1/3 rotations per second
+                self.rotation = (self.rotation + std::f64::consts::TAU / (FPS * 3) as f64)
                     .rem_euclid(std::f64::consts::TAU)
             }
             _ => {}
@@ -66,20 +51,33 @@ impl Body {
         }
 
         self.position += self.velocity;
-        // self.position = self.position.rem_euclid(bounds);
-        self.position.x = self.position.x.rem_euclid(bounds.x);
-        self.position.y = self.position.y.rem_euclid(bounds.y);
+        if wrap {
+            // self.position = self.position.rem_euclid(bounds);
+            self.position.x = self.position.x.rem_euclid(bounds.x);
+            self.position.y = self.position.y.rem_euclid(bounds.y);
+        }
     }
 }
 
+type Verts = Either<&'static [DVec2], Arc<[DVec2]>>;
+
 struct Polygon {
     /// Offsets from origin, cyclic
-    verts: Cow<'static, [DVec2]>,
+    verts: Verts,
+}
+
+enum Bounding {
+    /// This bounding box consists of N triangles, each with one vertex at the origin,
+    /// and two others consecutive elements of the cyclic list `verts`.
+    CyclicTriangles { verts: Verts },
 }
 
 struct Entity {
     body: Body,
-    verts: Option<Polygon>,
+    /// Should drawing and moving this entity wrap around the screen.
+    wrap: bool,
+    sprite_verts: Option<Polygon>,
+    bounding: Option<Bounding>,
     kind: EntityKind,
 }
 
@@ -100,22 +98,25 @@ enum EntityKind {
     },
 }
 
-const BULLET_VERTS: Cow<[DVec2]> = Cow::Borrowed(&[
+const BULLET_VERTS: Verts = Either::Left(&[
     DVec2 { x: 1.0, y: 3.0 },
     DVec2 { x: 1.0, y: -3.0 },
     DVec2 { x: -1.0, y: -3.0 },
     DVec2 { x: -1.0, y: 3.0 },
 ]);
 
-fn asteroid_verts(
-    vert_count: usize,
-    min_distance: f64,
-    max_distance: f64,
-) -> Cow<'static, [DVec2]> {
+const SHIP_VERTS: Verts = Either::Left(&[
+    DVec2 { x: 0.0, y: -20.0 },
+    DVec2 { x: 10.0, y: 10.0 },
+    DVec2 { x: 0.0, y: 0.0 },
+    DVec2 { x: -10.0, y: 10.0 },
+]);
+
+fn asteroid_verts(vert_count: usize, min_distance: f64, max_distance: f64) -> Verts {
     assert!(vert_count >= 3);
     let mut rng = rand::thread_rng();
     let theta_increment = std::f64::consts::TAU / (vert_count as f64);
-    Cow::Owned(
+    Either::Right(
         (0..vert_count)
             .map(|idx| {
                 rotation_matrix(theta_increment * idx as f64)
@@ -132,7 +133,11 @@ fn small_asteroid(body: Body) -> Entity {
     let verts = asteroid_verts(6, 20.0, 28.0);
     Entity {
         body,
-        verts: Some(Polygon { verts }),
+        wrap: true,
+        sprite_verts: Some(Polygon {
+            verts: verts.clone(),
+        }),
+        bounding: Some(Bounding::CyclicTriangles { verts }),
         kind: EntityKind::Asteroid { size: 0 },
     }
 }
@@ -141,7 +146,11 @@ fn medium_asteroid(body: Body) -> Entity {
     let verts = asteroid_verts(8, 30.0, 40.0);
     Entity {
         body,
-        verts: Some(Polygon { verts }),
+        wrap: true,
+        sprite_verts: Some(Polygon {
+            verts: verts.clone(),
+        }),
+        bounding: Some(Bounding::CyclicTriangles { verts }),
         kind: EntityKind::Asteroid { size: 1 },
     }
 }
@@ -150,7 +159,11 @@ fn large_asteroid(body: Body) -> Entity {
     let verts = asteroid_verts(14, 39.0, 50.0);
     Entity {
         body,
-        verts: Some(Polygon { verts }),
+        wrap: true,
+        sprite_verts: Some(Polygon {
+            verts: verts.clone(),
+        }),
+        bounding: Some(Bounding::CyclicTriangles { verts }),
         kind: EntityKind::Asteroid { size: 2 },
     }
 }
@@ -158,13 +171,6 @@ fn large_asteroid(body: Body) -> Entity {
 enum StepResult {
     None,
     RemoveEntity,
-}
-
-enum CollisionResult {
-    None,
-    RemoveSelf,
-    RemoveBoth,
-    RemoveOther,
 }
 
 impl Entity {
@@ -201,7 +207,11 @@ impl Entity {
                                 turning_left: false,
                                 turning_right: false,
                             },
-                            verts: Some(Polygon {
+                            wrap: true,
+                            sprite_verts: Some(Polygon {
+                                verts: BULLET_VERTS,
+                            }),
+                            bounding: Some(Bounding::CyclicTriangles {
                                 verts: BULLET_VERTS,
                             }),
                             kind: EntityKind::Bullet { ttl: 120 },
@@ -229,7 +239,7 @@ impl Entity {
     }
 
     fn step(&mut self, bounds: DVec2) -> StepResult {
-        self.body.step(bounds);
+        self.body.step(bounds, self.wrap);
         match &mut self.kind {
             EntityKind::Asteroid { .. } => {}
             EntityKind::Bullet { ttl } => match ttl.checked_sub(1) {
@@ -239,6 +249,49 @@ impl Entity {
             EntityKind::Player { .. } => {}
         }
         StepResult::None
+    }
+
+    fn bounding_triangles(&self) -> impl Iterator<Item = [DVec2; 3]> + Clone + '_ {
+        // type Ret = Either<_, std::iter::Empty<T>>;
+        let Some(bounding) = &self.bounding else { return Either::Right(std::iter::empty()) };
+        let Bounding::CyclicTriangles { verts } = bounding;
+        let rota = rotation_matrix(self.body.rotation);
+        let origin = self.body.position;
+        // // https://github.com/rust-itertools/itertools/issues/685
+        // let triangles = verts
+        //     .iter()
+        //     .copied()
+        //     .circular_tuple_windows()
+        //     .map(move |(p1, p2)| [origin, origin + rota * p1, origin + rota * p2]);
+        let vert_pairs = verts.iter().copied();
+        let triangles = vert_pairs
+            .cycle()
+            .take(verts.len())
+            .tuple_windows()
+            .map(move |(p1, p2)| [origin, origin + rota * p1, origin + rota * p2]);
+
+        Either::Left(triangles)
+    }
+
+    fn collision(&self, other: &Self) -> bool {
+        for self_triangle in self.bounding_triangles() {
+            for other_triangle in other.bounding_triangles() {
+                let all_points = [
+                    self_triangle[0] - other_triangle[0],
+                    self_triangle[0] - other_triangle[1],
+                    self_triangle[0] - other_triangle[2],
+                    self_triangle[1] - other_triangle[0],
+                    self_triangle[1] - other_triangle[1],
+                    self_triangle[1] - other_triangle[2],
+                    self_triangle[2] - other_triangle[0],
+                    self_triangle[2] - other_triangle[1],
+                    self_triangle[2] - other_triangle[2],
+                ];
+                // TODO: GJK algorithm? (see Reducible video)
+                todo!()
+            }
+        }
+        todo!()
     }
 }
 
@@ -279,7 +332,7 @@ pub fn main() {
 
     let mut canvas = window.into_canvas().build().unwrap();
 
-    canvas.set_draw_color(hue_to_color(0));
+    canvas.set_draw_color(Color::BLACK);
     canvas.clear();
     canvas.present();
 
@@ -312,14 +365,9 @@ pub fn main() {
     let mut frame_interval = tokio::time::interval(Duration::new(1, 0) / 60);
     let mut entities = vec![
         Entity {
-            verts: Some(Polygon {
-                verts: Cow::Borrowed(&[
-                    DVec2 { x: 0.0, y: -20.0 },
-                    DVec2 { x: 10.0, y: 10.0 },
-                    DVec2 { x: 0.0, y: 0.0 },
-                    DVec2 { x: -10.0, y: 10.0 },
-                ]),
-            }),
+            sprite_verts: Some(Polygon { verts: SHIP_VERTS }),
+            bounding: Some(Bounding::CyclicTriangles { verts: SHIP_VERTS }),
+            wrap: true,
             body: Body {
                 position: DVec2 { x: 80.0, y: 40.0 },
                 has_drag: true,
@@ -333,14 +381,9 @@ pub fn main() {
             },
         },
         Entity {
-            verts: Some(Polygon {
-                verts: Cow::Borrowed(&[
-                    DVec2 { x: 0.0, y: -20.0 },
-                    DVec2 { x: 10.0, y: 10.0 },
-                    DVec2 { x: 0.0, y: 0.0 },
-                    DVec2 { x: -10.0, y: 10.0 },
-                ]),
-            }),
+            sprite_verts: Some(Polygon { verts: SHIP_VERTS }),
+            bounding: Some(Bounding::CyclicTriangles { verts: SHIP_VERTS }),
+            wrap: true,
             body: Body {
                 position: DVec2 { x: 240.0, y: 40.0 },
                 has_drag: true,
@@ -406,12 +449,14 @@ pub fn main() {
         let bounds: UVec2 = canvas.output_size().unwrap().into();
         let bounds: DVec2 = bounds.as_dvec2();
 
-        // TODO: collisions
         entities.retain_mut(|entity| match entity.step(bounds) {
             StepResult::RemoveEntity => false,
             StepResult::None => true,
         });
-        entities.sort_unstable_by_key(|entity| float_ord::FloatOrd(entity.body.position.y));
+
+        // TODO: collisions
+
+        // entities.sort_unstable_by_key(|entity| float_ord::FloatOrd(entity.body.position.y));
         for entity in &entities {
             let pos = entity.body.position;
             let rota = rotation_matrix(entity.body.rotation);
@@ -419,42 +464,46 @@ pub fn main() {
             // canvas.set_draw_color(hue_to_color((hue + entity.color_offset) % (255 * 6)));
             canvas.set_draw_color(draw_color);
 
-            if let Some(verts) = &entity.verts {
+            if let Some(verts) = &entity.sprite_verts {
                 for (p1, p2) in verts.verts.iter().copied().circular_tuple_windows() {
                     let p1 = rota * p1 + pos;
                     let p2 = rota * p2 + pos;
-                    let minx = p1.x.min(p2.x);
-                    let maxx = p1.x.max(p2.x);
-                    let miny = p1.y.min(p2.y);
-                    let maxy = p1.y.max(p2.y);
-                    let mut dxs: ArrayVec<i32, 3> = ArrayVec::from_iter([0]);
-                    let mut dys: ArrayVec<i32, 3> = ArrayVec::from_iter([0]);
-                    if minx < 0.0 {
-                        // If the line crosses the top edge, copy it down to the bottom edge
-                        dxs.push(1);
-                    }
-                    if maxx > bounds.x {
-                        // If the line crosses the bottom edge, copy it up to the top edge
-                        dxs.push(-1);
-                    }
-                    if miny < 0.0 {
-                        // If the line crosses the left edge, copy it right to the right edge
-                        dys.push(1);
-                    }
-                    if maxy > bounds.y {
-                        // If the line crosses the right edge, copy it left to the left edge
-                        dys.push(-1);
-                    }
-                    for dy in dys {
-                        for dx in dxs.clone() {
-                            let mult = DVec2 {
-                                x: dx as f64,
-                                y: dy as f64,
-                            };
-                            let offset = bounds * mult;
-                            let p1 = p1 + offset;
-                            let p2 = p2 + offset;
-                            canvas.draw_line(p1.as_point(), p2.as_point()).ok();
+                    if !entity.wrap {
+                        canvas.draw_line(p1.as_point(), p2.as_point()).ok();
+                    } else {
+                        let minx = p1.x.min(p2.x);
+                        let maxx = p1.x.max(p2.x);
+                        let miny = p1.y.min(p2.y);
+                        let maxy = p1.y.max(p2.y);
+                        let mut dxs: ArrayVec<i32, 3> = ArrayVec::from_iter([0]);
+                        let mut dys: ArrayVec<i32, 3> = ArrayVec::from_iter([0]);
+                        if minx < 0.0 {
+                            // If the line is at all above the top edge, copy it down to the bottom edge
+                            dxs.push(1);
+                        }
+                        if maxx > bounds.x {
+                            // If the line is at all below the bottom edge, copy it up to the top edge
+                            dxs.push(-1);
+                        }
+                        if miny < 0.0 {
+                            // If the line is at left of above the left edge, copy it right to the right edge
+                            dys.push(1);
+                        }
+                        if maxy > bounds.y {
+                            // If the line is at all right of the right edge, copy it left to the left edge
+                            dys.push(-1);
+                        }
+                        for dy in dys {
+                            for dx in dxs.clone() {
+                                let mult = DVec2 {
+                                    x: dx as f64,
+                                    y: dy as f64,
+                                };
+                                let offset = bounds * mult;
+                                let p1 = p1 + offset;
+                                let p2 = p2 + offset;
+                                canvas.draw_line(p1.as_point(), p2.as_point()).ok();
+                            }
                         }
                     }
                 }
