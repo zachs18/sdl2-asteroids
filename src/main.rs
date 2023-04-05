@@ -14,7 +14,7 @@ mod as_point;
 
 const FPS: u32 = 60;
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct Body {
     position: DVec2,
     velocity: DVec2,
@@ -26,40 +26,8 @@ struct Body {
     turning_right: bool,
 }
 
-impl Body {
-    fn step(&mut self, bounds: DVec2, wrap: bool) {
-        if self.accelerating {
-            let rota = rotation_matrix(self.rotation);
-            self.velocity += rota * DVec2 { x: 0.0, y: -0.1 };
-        }
-        match (self.turning_left, self.turning_right) {
-            (false, true) => {
-                // Rotate at 1/3 rotations per second
-                self.rotation = (self.rotation - std::f64::consts::TAU / (FPS * 3) as f64)
-                    .rem_euclid(std::f64::consts::TAU);
-            }
-            (true, false) => {
-                // Rotate at 1/3 rotations per second
-                self.rotation = (self.rotation + std::f64::consts::TAU / (FPS * 3) as f64)
-                    .rem_euclid(std::f64::consts::TAU)
-            }
-            _ => {}
-        }
-
-        if self.has_drag {
-            self.velocity *= 0.99;
-        }
-
-        self.position += self.velocity;
-        if wrap {
-            // self.position = self.position.rem_euclid(bounds);
-            self.position.x = self.position.x.rem_euclid(bounds.x);
-            self.position.y = self.position.y.rem_euclid(bounds.y);
-        }
-    }
-}
-
 type Verts = Either<&'static [DVec2], Arc<[DVec2]>>;
+type Triangles = Either<&'static [[DVec2; 3]], Arc<[[DVec2; 3]]>>;
 
 struct Polygon {
     /// Offsets from origin, cyclic
@@ -70,23 +38,38 @@ enum Bounding {
     /// This bounding box consists of N triangles, each with one vertex at the origin,
     /// and two others consecutive elements of the cyclic list `verts`.
     CyclicTriangles { verts: Verts },
+    /// This bounding box consists of N triangles, each explicitly listed.
+    Triangles { triangles: Triangles },
+}
+
+enum WrappingBehavior {
+    Yes,
+    No,
+    /// Wrapping should change to `Yes` once this entity is entirely on-screen,
+    /// but should behave as `No` until then.
+    OnceOnScreen,
 }
 
 struct Entity {
     body: Body,
     /// Should drawing and moving this entity wrap around the screen.
-    wrap: bool,
+    wrap: WrappingBehavior,
     sprite_verts: Option<Polygon>,
     bounding: Option<Bounding>,
     kind: EntityKind,
 }
 
+#[derive(Debug, Clone, Copy)]
 enum EntityKind {
     Asteroid {
         /// Decremented by 1 each time the asteroid splits, until it is gone.
         size: usize,
     },
     Bullet {
+        /// Time to live, in frames
+        ttl: u64,
+    },
+    Debris {
         /// Time to live, in frames
         ttl: u64,
     },
@@ -104,6 +87,21 @@ const BULLET_VERTS: Verts = Either::Left(&[
     DVec2 { x: -1.0, y: -3.0 },
     DVec2 { x: -1.0, y: 3.0 },
 ]);
+
+const BULLET_BOUNDS: Bounding = Bounding::Triangles {
+    triangles: Either::Left(&[
+        [
+            DVec2 { x: 1.0, y: 3.0 },
+            DVec2 { x: 1.0, y: -3.0 },
+            DVec2 { x: -1.0, y: -3.0 },
+        ],
+        [
+            DVec2 { x: 1.0, y: -3.0 },
+            DVec2 { x: -1.0, y: -3.0 },
+            DVec2 { x: -1.0, y: 3.0 },
+        ],
+    ]),
+};
 
 const SHIP_VERTS: Verts = Either::Left(&[
     DVec2 { x: 0.0, y: -20.0 },
@@ -129,42 +127,35 @@ fn asteroid_verts(vert_count: usize, min_distance: f64, max_distance: f64) -> Ve
     )
 }
 
-fn small_asteroid(body: Body) -> Entity {
-    let verts = asteroid_verts(6, 20.0, 28.0);
+fn new_debris(body: Body) -> Entity {
+    let verts = asteroid_verts(9, 2.0, 5.0);
     Entity {
         body,
-        wrap: true,
+        wrap: WrappingBehavior::Yes,
         sprite_verts: Some(Polygon {
             verts: verts.clone(),
         }),
         bounding: Some(Bounding::CyclicTriangles { verts }),
-        kind: EntityKind::Asteroid { size: 0 },
+        kind: EntityKind::Debris { ttl: 30 },
     }
 }
 
-fn medium_asteroid(body: Body) -> Entity {
-    let verts = asteroid_verts(8, 30.0, 40.0);
+fn new_asteroid(size: usize, body: Body) -> Entity {
+    let verts = match size {
+        0 => panic!("Invalid asteroid size"),
+        1 => asteroid_verts(6, 20.0, 28.0),
+        2 => asteroid_verts(8, 30.0, 40.0),
+        3 => asteroid_verts(14, 39.0, 50.0),
+        _ => unreachable!(),
+    };
     Entity {
         body,
-        wrap: true,
+        wrap: WrappingBehavior::Yes,
         sprite_verts: Some(Polygon {
             verts: verts.clone(),
         }),
         bounding: Some(Bounding::CyclicTriangles { verts }),
-        kind: EntityKind::Asteroid { size: 1 },
-    }
-}
-
-fn large_asteroid(body: Body) -> Entity {
-    let verts = asteroid_verts(14, 39.0, 50.0);
-    Entity {
-        body,
-        wrap: true,
-        sprite_verts: Some(Polygon {
-            verts: verts.clone(),
-        }),
-        bounding: Some(Bounding::CyclicTriangles { verts }),
-        kind: EntityKind::Asteroid { size: 2 },
+        kind: EntityKind::Asteroid { size },
     }
 }
 
@@ -207,13 +198,11 @@ impl Entity {
                                 turning_left: false,
                                 turning_right: false,
                             },
-                            wrap: true,
+                            wrap: WrappingBehavior::Yes,
                             sprite_verts: Some(Polygon {
                                 verts: BULLET_VERTS,
                             }),
-                            bounding: Some(Bounding::CyclicTriangles {
-                                verts: BULLET_VERTS,
-                            }),
+                            bounding: Some(BULLET_BOUNDS),
                             kind: EntityKind::Bullet { ttl: 120 },
                         })
                     }
@@ -233,16 +222,77 @@ impl Entity {
                 _ => {}
             },
             EntityKind::Asteroid { .. } => {}
-            EntityKind::Bullet { .. } => {} // _ => todo!(),
+            EntityKind::Bullet { .. } => {}
+            EntityKind::Debris { .. } => {} // _ => todo!(),
         }
         new_entities
     }
 
     fn step(&mut self, bounds: DVec2) -> StepResult {
-        self.body.step(bounds, self.wrap);
+        if self.body.accelerating {
+            let rota = rotation_matrix(self.body.rotation);
+            self.body.velocity += rota * DVec2 { x: 0.0, y: -0.1 };
+        }
+        match (self.body.turning_left, self.body.turning_right) {
+            (false, true) => {
+                // Rotate at 1/3 rotations per second
+                self.body.rotation = (self.body.rotation
+                    - std::f64::consts::TAU / (FPS * 3) as f64)
+                    .rem_euclid(std::f64::consts::TAU);
+            }
+            (true, false) => {
+                // Rotate at 1/3 rotations per second
+                self.body.rotation = (self.body.rotation + std::f64::consts::TAU / (FPS * 3) as f64)
+                    .rem_euclid(std::f64::consts::TAU)
+            }
+            _ => {}
+        }
+
+        if self.body.has_drag {
+            self.body.velocity *= 0.99;
+        }
+
+        self.body.position += self.body.velocity;
+        match self.wrap {
+            WrappingBehavior::No => {}
+            WrappingBehavior::Yes => {
+                // self.position = self.position.rem_euclid(bounds);
+                self.body.position.x = self.body.position.x.rem_euclid(bounds.x);
+                self.body.position.y = self.body.position.y.rem_euclid(bounds.y);
+            }
+            WrappingBehavior::OnceOnScreen => {
+                let (min_self_x, max_self_x, min_self_y, max_self_y) = self
+                    .bounding_triangles()
+                    .flatten()
+                    .chain([self.body.position])
+                    .fold(
+                        (
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                        ),
+                        |(min_self_x, max_self_x, min_self_y, max_self_y), DVec2 { x, y }| {
+                            (
+                                x.min(min_self_x),
+                                x.max(max_self_x),
+                                y.min(min_self_y),
+                                y.max(max_self_y),
+                            )
+                        },
+                    );
+                if min_self_x >= 0.0
+                    && min_self_y >= 0.0
+                    && max_self_x <= bounds.x
+                    && max_self_y <= bounds.y
+                {
+                    self.wrap = WrappingBehavior::Yes;
+                }
+            }
+        }
         match &mut self.kind {
             EntityKind::Asteroid { .. } => {}
-            EntityKind::Bullet { ttl } => match ttl.checked_sub(1) {
+            EntityKind::Bullet { ttl } | EntityKind::Debris { ttl } => match ttl.checked_sub(1) {
                 Some(new_ttl) => *ttl = new_ttl,
                 None => return StepResult::RemoveEntity,
             },
@@ -253,29 +303,100 @@ impl Entity {
 
     fn bounding_triangles(&self) -> impl Iterator<Item = [DVec2; 3]> + Clone + '_ {
         // type Ret = Either<_, std::iter::Empty<T>>;
-        let Some(bounding) = &self.bounding else { return Either::Right(std::iter::empty()) };
-        let Bounding::CyclicTriangles { verts } = bounding;
+        let Some(bounding) = &self.bounding else { return Either::Right(Either::Right(std::iter::empty())) };
         let rota = rotation_matrix(self.body.rotation);
         let origin = self.body.position;
-        // // https://github.com/rust-itertools/itertools/issues/685
-        // let triangles = verts
-        //     .iter()
-        //     .copied()
-        //     .circular_tuple_windows()
-        //     .map(move |(p1, p2)| [origin, origin + rota * p1, origin + rota * p2]);
-        let vert_pairs = verts.iter().copied();
-        let triangles = vert_pairs
-            .cycle()
-            .take(verts.len())
-            .tuple_windows()
-            .map(move |(p1, p2)| [origin, origin + rota * p1, origin + rota * p2]);
+        match bounding {
+            Bounding::CyclicTriangles { verts } => {
+                // // https://github.com/rust-itertools/itertools/issues/685
+                // let triangles = verts
+                //     .iter()
+                //     .copied()
+                //     .circular_tuple_windows()
+                //     .map(move |(p1, p2)| [origin, origin + rota * p1, origin + rota * p2]);
+                let triangles = verts
+                    .iter()
+                    .cycle()
+                    .tuple_windows()
+                    .take(verts.len())
+                    .map(move |(&p1, &p2)| [origin, origin + rota * p1, origin + rota * p2]);
 
-        Either::Left(triangles)
+                Either::Left(triangles)
+            }
+            Bounding::Triangles { triangles } => {
+                let triangles = triangles.iter().map(move |&[p1, p2, p3]| {
+                    [origin + rota * p1, origin + rota * p2, origin + rota * p3]
+                });
+
+                Either::Right(Either::Left(triangles))
+            }
+        }
+    }
+
+    /// Returns true if self and other may collide, i.e. if they do anything when they overlap.
+    fn collides_with(&self, other: &Self) -> bool {
+        match (self.kind, other.kind) {
+            (EntityKind::Debris { .. }, _) | (_, EntityKind::Debris { .. }) => false,
+            (EntityKind::Asteroid { .. }, EntityKind::Asteroid { .. }) => false,
+            (EntityKind::Bullet { .. }, EntityKind::Bullet { .. }) => false,
+
+            (EntityKind::Bullet { .. }, EntityKind::Asteroid { .. }) => true,
+            (EntityKind::Asteroid { .. }, EntityKind::Bullet { .. }) => true,
+            (EntityKind::Asteroid { .. }, EntityKind::Player { .. }) => true,
+            (EntityKind::Bullet { .. }, EntityKind::Player { .. }) => true,
+            (EntityKind::Player { .. }, EntityKind::Asteroid { .. }) => true,
+            (EntityKind::Player { .. }, EntityKind::Bullet { .. }) => true,
+            (EntityKind::Player { .. }, EntityKind::Player { .. }) => true,
+        }
     }
 
     fn collision(&self, other: &Self) -> bool {
         for self_triangle in self.bounding_triangles() {
+            // Simple fast-negative check
+            let (min_self_x, max_self_x, min_self_y, max_self_y) = self_triangle.iter().fold(
+                (
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                ),
+                |(min_self_x, max_self_x, min_self_y, max_self_y), &DVec2 { x, y }| {
+                    (
+                        x.min(min_self_x),
+                        x.max(max_self_x),
+                        y.min(min_self_y),
+                        y.max(max_self_y),
+                    )
+                },
+            );
             for other_triangle in other.bounding_triangles() {
+                // Simple fast-negative check
+                let (min_other_x, max_other_x, min_other_y, max_other_y) =
+                    other_triangle.iter().fold(
+                        (
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                        ),
+                        |(min_other_x, max_other_x, min_other_y, max_other_y), &DVec2 { x, y }| {
+                            (
+                                x.min(min_other_x),
+                                x.max(max_other_x),
+                                y.min(min_other_y),
+                                y.max(max_other_y),
+                            )
+                        },
+                    );
+
+                if max_self_x < min_other_x
+                    || min_self_x > max_other_x
+                    || max_self_y < min_other_y
+                    || min_self_y > max_other_y
+                {
+                    continue;
+                }
+
                 let all_points = [
                     self_triangle[0] - other_triangle[0],
                     self_triangle[0] - other_triangle[1],
@@ -287,11 +408,13 @@ impl Entity {
                     self_triangle[2] - other_triangle[1],
                     self_triangle[2] - other_triangle[2],
                 ];
+
                 // TODO: GJK algorithm? (see Reducible video)
-                todo!()
+                eprintln!("TODO: actual collision");
+                return true;
             }
         }
-        todo!()
+        false
     }
 }
 
@@ -367,9 +490,9 @@ pub fn main() {
         Entity {
             sprite_verts: Some(Polygon { verts: SHIP_VERTS }),
             bounding: Some(Bounding::CyclicTriangles { verts: SHIP_VERTS }),
-            wrap: true,
+            wrap: WrappingBehavior::Yes,
             body: Body {
-                position: DVec2 { x: 80.0, y: 40.0 },
+                position: DVec2 { x: 300.0, y: 300.0 },
                 has_drag: true,
                 ..Default::default()
             },
@@ -383,9 +506,9 @@ pub fn main() {
         Entity {
             sprite_verts: Some(Polygon { verts: SHIP_VERTS }),
             bounding: Some(Bounding::CyclicTriangles { verts: SHIP_VERTS }),
-            wrap: true,
+            wrap: WrappingBehavior::Yes,
             body: Body {
-                position: DVec2 { x: 240.0, y: 40.0 },
+                position: DVec2 { x: 500.0, y: 300.0 },
                 has_drag: true,
                 ..Default::default()
             },
@@ -396,33 +519,42 @@ pub fn main() {
                 fire: Some(Keycode::LCtrl),
             },
         },
-        large_asteroid(Body {
-            position: DVec2::default(),
-            velocity: DVec2 { x: -1.0, y: 2.2 },
-            rotation: 0.0,
-            has_drag: false,
-            accelerating: false,
-            turning_left: false,
-            turning_right: false,
-        }),
-        medium_asteroid(Body {
-            position: DVec2::default(),
-            velocity: DVec2 { x: 1.0, y: 1.2 },
-            rotation: 0.0,
-            has_drag: false,
-            accelerating: false,
-            turning_left: false,
-            turning_right: false,
-        }),
-        small_asteroid(Body {
-            position: DVec2::default(),
-            velocity: DVec2 { x: 2.0, y: -1.6 },
-            rotation: 0.0,
-            has_drag: false,
-            accelerating: false,
-            turning_left: false,
-            turning_right: false,
-        }),
+        new_asteroid(
+            3,
+            Body {
+                position: DVec2::default(),
+                velocity: DVec2 { x: -1.0, y: 2.2 },
+                rotation: 0.0,
+                has_drag: false,
+                accelerating: false,
+                turning_left: false,
+                turning_right: false,
+            },
+        ),
+        new_asteroid(
+            2,
+            Body {
+                position: DVec2::default(),
+                velocity: DVec2 { x: 1.0, y: 1.2 },
+                rotation: 0.0,
+                has_drag: false,
+                accelerating: false,
+                turning_left: false,
+                turning_right: false,
+            },
+        ),
+        new_asteroid(
+            1,
+            Body {
+                position: DVec2::default(),
+                velocity: DVec2 { x: 2.0, y: -1.6 },
+                rotation: 0.0,
+                has_drag: false,
+                accelerating: false,
+                turning_left: false,
+                turning_right: false,
+            },
+        ),
     ];
 
     'running: loop {
@@ -454,7 +586,109 @@ pub fn main() {
             StepResult::None => true,
         });
 
+        macro_rules! split_asteroid {
+            (asteroid = $asteroid:expr, bullet = $bullet:expr) => {
+                let asteroid = $asteroid;
+                let bullet = $bullet;
+                let EntityKind::Asteroid { size } = asteroid.kind else { unreachable!() };
+                dbg!(size);
+                if size > 1 {
+                    dbg!(size);
+                    let split_direction = bullet.body.rotation + std::f64::consts::FRAC_PI_2;
+                    let mut left_asteroid = new_asteroid(size - 1, asteroid.body);
+                    let mut right_asteroid = new_asteroid(size - 1, asteroid.body);
+                    let rota = rotation_matrix(split_direction);
+                    let left = rota * DVec2 { x: 0.0, y: 1.0 };
+                    let right = -left;
+                    left_asteroid.body.velocity += left;
+                    left_asteroid.body.position += left;
+                    right_asteroid.body.velocity += right;
+                    right_asteroid.body.position += right;
+                    entities.extend([left_asteroid, right_asteroid]);
+                }
+                for _ in 0..size * 4 - 2 {
+                    let debris_direction =
+                        rand::thread_rng().gen_range(0.0..=std::f64::consts::TAU);
+                    let rota = rotation_matrix(debris_direction);
+                    let velocity_offset = rota * DVec2 { x: 0.0, y: 4.0 };
+                    let mut body = asteroid.body;
+                    body.velocity += velocity_offset;
+                    entities.push(new_debris(body));
+                }
+            };
+            (bullet = $bullet:expr, asteroid = $asteroid:expr) => {
+                let bullet = $bullet;
+                let asteroid = $asteroid;
+                split_asteroid!(asteroid = asteroid, bullet = bullet);
+            };
+        }
+
         // TODO: collisions
+        let mut i = 0;
+        while i < entities.len() {
+            let mut j = 0;
+            while i < entities.len() && j < i {
+                if entities[i].collides_with(&entities[j]) && entities[i].collision(&entities[j]) {
+                    match (entities[i].kind, entities[j].kind) {
+                        (EntityKind::Debris { .. }, _) | (_, EntityKind::Debris { .. }) => {}
+                        (EntityKind::Asteroid { .. }, EntityKind::Asteroid { .. }) => {}
+                        (EntityKind::Bullet { .. }, EntityKind::Bullet { .. }) => {}
+                        (EntityKind::Bullet { .. }, EntityKind::Asteroid { .. }) => {
+                            let bullet = entities.swap_remove(i.max(j));
+                            let asteroid = entities.swap_remove(i.min(j));
+                            split_asteroid!(asteroid = asteroid, bullet = bullet);
+                        }
+                        (EntityKind::Asteroid { .. }, EntityKind::Bullet { .. }) => {
+                            let asteroid = entities.swap_remove(i.max(j));
+                            let bullet = entities.swap_remove(i.min(j));
+                            split_asteroid!(asteroid = asteroid, bullet = bullet);
+                        }
+                        (
+                            EntityKind::Asteroid { size },
+                            EntityKind::Player {
+                                fire,
+                                accelerate,
+                                turn_left,
+                                turn_right,
+                            },
+                        ) => eprintln!("TODO: Player at {:?} dies", entities[j].body.position),
+                        (
+                            EntityKind::Bullet { ttl },
+                            EntityKind::Player {
+                                fire,
+                                accelerate,
+                                turn_left,
+                                turn_right,
+                            },
+                        ) => eprintln!("TODO: Player at {:?} dies", entities[j].body.position),
+                        (
+                            EntityKind::Player {
+                                fire,
+                                accelerate,
+                                turn_left,
+                                turn_right,
+                            },
+                            EntityKind::Asteroid { size },
+                        ) => eprintln!("TODO: Player at {:?} dies", entities[i].body.position),
+                        (
+                            EntityKind::Player {
+                                fire,
+                                accelerate,
+                                turn_left,
+                                turn_right,
+                            },
+                            EntityKind::Bullet { ttl },
+                        ) => eprintln!("TODO: Player at {:?} dies", entities[i].body.position),
+                        (EntityKind::Player { .. }, EntityKind::Player { .. }) => {
+                            eprintln!("TODO: Players collided")
+                        }
+                    }
+                }
+
+                j += 1;
+            }
+            i += 1;
+        }
 
         // entities.sort_unstable_by_key(|entity| float_ord::FloatOrd(entity.body.position.y));
         for entity in &entities {
@@ -468,7 +702,7 @@ pub fn main() {
                 for (p1, p2) in verts.verts.iter().copied().circular_tuple_windows() {
                     let p1 = rota * p1 + pos;
                     let p2 = rota * p2 + pos;
-                    if !entity.wrap {
+                    if !matches!(entity.wrap, WrappingBehavior::Yes) {
                         canvas.draw_line(p1.as_point(), p2.as_point()).ok();
                     } else {
                         let minx = p1.x.min(p2.x);
